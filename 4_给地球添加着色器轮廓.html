@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地球的自转</title>
+</head>
+
+<body>
+    <script src="./three.js"></script>
+    <script src="./OrbitControls.js"></script>
+    <script src="./EffectComposer.js"></script>
+    <script src="./RenderPass.js"></script>
+    <script src="./CopyShader.js"></script>
+    <script src="./ShaderPass.js"></script>
+    <script src="./MaskPass.js"></script>
+    <script>
+        var scene, blurScene, blurComposer, sceneComposer,  vertexShader,fragmentShader,AdditiveBlendShader, camera, renderer, earth, earthGroup = new THREE.Group(), longitude = [], latitude = [], morningLine, twilightLine;
+        var lightDirection = new THREE.Vector3(10, 0, 0);
+        var rotationAngle = 0.001;
+        var brightnessScale = 0.3;
+        var hasGlow = true;
+        var controls;
+
+        init();
+        animate();
+        helper();
+
+        function helper() {
+            const axesHelper = new THREE.AxesHelper(200);
+            scene.add(axesHelper);
+
+            const gridHelper = new THREE.GridHelper(3, 30);
+            scene.add(gridHelper);
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.x = 0;
+            camera.position.y = 0;
+            camera.position.z = 3;
+
+            renderer = new THREE.WebGLRenderer({  // 启用 alpha 通道，允许渲染结果具有透明度
+                alpha: true,
+                // 启用抗锯齿（antialiasing）效果，提高渲染的图像质量
+                antialias: true,
+                // 保留绘图缓冲区（preserveDrawingBuffer），允许在渲染后保留渲染结果
+                preserveDrawingBuffer: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x000000, 0)
+            renderer.setPixelRatio(window.devicePixelRatio) // this line would make FPS decreased at 30 for mobile device
+
+            document.body.appendChild(renderer.domElement);
+
+            // 定义顶点着色器
+            vertexShader = ['varying vec3 vNormal;', 'void main() {', 'vNormal = normalize( normalMatrix * normal );', 'gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );', '}'].join('\n')
+
+            // 定义片元着色器
+            fragmentShader = ['uniform float c;', 'uniform float p;', 'varying vec3 vNormal;', 'void main() {', 'float intensity = pow( c - dot( vNormal, vec3( 0.0, 0.0, 1.0 ) ), p );', 'gl_FragColor = vec4( 0.2, 0.58, 0.9, 0.3 ) * intensity;', '}'].join('\n')
+
+            // 创建用于发光混合效果的着色器对象
+            AdditiveBlendShader = {
+                uniforms: {
+                    'tSampler1': { type: 't', value: null },
+                    'tSampler2': { type: 't', value: null }
+                },
+                vertexShader: ['varying vec2 vUv;', 'void main() {', 'vUv = uv;', 'gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );', '}'].join('\n'),
+                fragmentShader: ['uniform sampler2D tSampler1;', 'uniform sampler2D tSampler2;', 'varying vec2 vUv;', 'void main() {', 'vec4 texture1 = texture2D( tSampler1, vUv );', 'vec4 texture2 = texture2D( tSampler2, vUv );', 'gl_FragColor = texture1 + texture2;', '}'].join('\n')
+            }
+
+            addEarth();
+            addAxisOfTheEarth();
+            addLatitudeAndLongitudeLines();
+            earthGroup.rotateZ(Math.PI / 180 * 23.5);
+            scene.add(earthGroup);
+            createOutGlow();
+        }
+
+        function addEarth() {
+            var earthGeometry = new THREE.SphereGeometry(0.99, 32, 32);
+
+            var textureLoader = new THREE.TextureLoader();
+            var dayTexture = textureLoader.load('1_earth_16k.jpg');
+            var nightTexture = textureLoader.load('5_night_8k.jpg');
+
+            var earthMaterial = new THREE.ShaderMaterial({
+                vertexShader: `
+                    varying vec2 vUv;
+                    varying vec3 vNormal;
+                    void main() {
+                        vUv = uv;
+                        vNormal = normalize(normalMatrix * normal);
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    varying vec2 vUv;
+                    varying vec3 vNormal;
+                    uniform sampler2D dayTexture;
+                    uniform sampler2D nightTexture;
+                    uniform vec3 lightDirection;
+
+                    void main() {
+                        float brightness = max(dot(vNormal, lightDirection), 0.0) * ${brightnessScale};
+
+                        vec4 dayColor = texture2D(dayTexture, vUv);
+                        vec4 nightColor = texture2D(nightTexture, vUv);
+                        gl_FragColor = mix(nightColor, dayColor, brightness);
+                    }
+                `,
+                uniforms: {
+                    dayTexture: { type: 't', value: dayTexture },
+                    nightTexture: { type: 't', value: nightTexture },
+                    lightDirection: { type: 'v3', value: lightDirection },
+                },
+            });
+
+            earth = new THREE.Mesh(earthGeometry, earthMaterial);
+            //earth.rotation.z = THREE.Math.degToRad(23.5);
+            earthGroup.add(earth);
+            //scene.add(earth);
+        }
+
+        function addAxisOfTheEarth() {
+            // 创建一个圆柱几何体表示地轴
+            var axisOfTheEarthGeometry = new THREE.CylinderGeometry(0.01, 0.01, 2.3, 32);
+            var axisOfTheEarthMaterial = new THREE.MeshBasicMaterial({ color: 0x4D4D4D });
+            var axisOfTheEarth = new THREE.Mesh(axisOfTheEarthGeometry, axisOfTheEarthMaterial);
+
+            axisOfTheEarth.position.set(0, 0, 0);
+            //axisOfTheEarth.rotation.z = THREE.Math.degToRad(23.5);
+            earthGroup.add(axisOfTheEarth);
+            //scene.add(axisOfTheEarth);
+        }
+
+        function addLatitudeAndLongitudeLines() {
+
+            // 经线
+            const speciallongitudes = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340];
+            for (let i = 0; i < speciallongitudes.length; i++) {
+                longitude[i] = addCustomizeCircle(1, 0xaaaaaa, 99, 180, 0.003, 0.5, 0.5).rotateY(speciallongitudes[i] * Math.PI / 180).rotateZ(Math.PI / 2);
+                earthGroup.add(longitude[i]);
+            }
+
+            //longitudeGroup.rotation.z = THREE.Math.degToRad(23.5);
+            //scene.add(longitudeGroup);
+            //earthGroup.add(longitudeGroup);
+            // 纬线
+            const specialLatitudes = [-23.26, -66.34, 23.26, 66.34];
+
+            for (let i = 0; i < specialLatitudes.length; i++) {
+                const lat = specialLatitudes[i];
+                const latLineGeometry = new THREE.BufferGeometry();
+                const positions = [];
+
+                for (let lon = 0; lon <= 360; lon += 5) {
+                    const phi = THREE.Math.degToRad(lat);
+                    const theta = THREE.Math.degToRad(lon);
+                    const x = Math.cos(phi) * Math.cos(theta);
+                    const y = Math.cos(phi) * Math.sin(theta);
+                    const z = Math.sin(phi);
+                    positions.push(x, y, z);
+                }
+
+                latLineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                // 创建虚线材质
+                const latLineMaterial = new THREE.LineDashedMaterial({
+                    color: 0xaaaaaa,
+                    linewidth: 1,   // 线的宽度
+                    scale: 1,        // 控制虚线的大小
+                    dashSize: 0.005,   // 虚线的短划线段长度
+                    gapSize: 0.005,    // 两个虚线之间的间隙长度
+                    side: THREE.FrontSide
+                });
+
+                var latLine = new THREE.Line(latLineGeometry, latLineMaterial);
+                latLine.computeLineDistances(); // 计算虚线的距离
+                //computeLineDistances() 方法用于计算虚线的距离，这是确保虚线正常显示的重要一步。
+
+                latLine.rotation.x = -Math.PI / 2; // 水平方向
+                //latLine.rotation.y = -THREE.Math.degToRad(23.5); // 与地球的倾斜角度一致
+                scene.add(latLine);
+                latitude[i] = latLine;
+                earthGroup.add(latLine);
+            }
+
+            //addCustomizeCircle(lglt2xyz(0, 23.26, 1).x, 0xff6600, 64, 360, 0.002).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, 23.26, 1).y);
+            latitude[4] = addCustomizeCircle(lglt2xyz(0, 30, 1).x, 0xaaaaaa, 64, 360, 0.003).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, 30, 1).y);
+            latitude[5] = addCustomizeCircle(lglt2xyz(0, 60, 1).x, 0xaaaaaa, 64, 360, 0.003).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, 60, 1).y);
+            //addCustomizeCircle(lglt2xyz(0, 66.34, 1).x, 0xff6600, 64, 360, 0.002).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, 66.34, 1).y);
+            //addCustomizeCircle(lglt2xyz(0, -23.26, 1).x, 0xff6600, 64, 360, 0.002).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, -23.26, 1).y);
+
+            latitude[6] = addCustomizeCircle(lglt2xyz(0, -30, 1).x, 0xaaaaaa, 64, 360, 0.003).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, -30, 1).y);
+            latitude[7] = addCustomizeCircle(lglt2xyz(0, -60, 1).x, 0xaaaaaa, 64, 360, 0.003).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, -60, 1).y);
+            //addCustomizeCircle(lglt2xyz(0, -66.34, 1).x, 0xff6600, 64, 360, 0.002).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, -66.34, 1).y);
+
+            latitude[8] = addCustomizeCircle(lglt2xyz(0, 0, 1).x, 0xaaaaaa, 64, 360, 0.003).rotateX(Math.PI / 2).translateZ(lglt2xyz(0, 0, 1).y);
+
+            earthGroup.add(latitude[4]);
+            earthGroup.add(latitude[5]);
+            earthGroup.add(latitude[6]);
+            earthGroup.add(latitude[7]);
+            earthGroup.add(latitude[8]);
+
+            //latitudeGroup.rotation.z = THREE.Math.degToRad(23.5);
+            //scene.add(latitudeGroup)
+            //earthGroup.add(latitudeGroup)
+        }
+
+        function addCustomizeCircle(radius, color, segments = 64, angle, length) {
+            // 创建一个路径对象
+            const path = new THREE.Curve();
+            // 定义路径上的点的获取方法
+            path.getPoint = function (t) {
+                const a = 2 * Math.PI * t * angle / 360; // 计算角度
+                // 根据半径和角度计算点的坐标
+                return new THREE.Vector3(radius * Math.cos(a), radius * Math.sin(a), 0);
+            };
+
+            // 创建圆形的材质
+            const material = new THREE.MeshBasicMaterial({ color });
+            // 创建圆形的几何体
+            const geometry = new THREE.TubeGeometry(path, segments, length, 64);
+
+            // 创建圆形的网格模型
+            const mesh = new THREE.Mesh(geometry, material);
+            // 将圆形的网格模型添加到元素的 object 中
+            //scene.add(mesh);
+            return mesh; // 返回圆形的网格模型
+        }
+
+        /*********************************************************************************
+        
+        function lglt2xyz(lng:number, lat:number, radius:number)
+
+        这段代码是一个用于将地理坐标系中的经度（lng）和纬度（lat）转换为三维空间坐标系中的坐标的函数。
+
+        1. 将经度（lng）转换为弧度并存储在变量theta中。这是通过将经度的角度值加上90度，然后乘以π/180来实现的。
+        2. 将纬度（lat）转换为弧度并存储在变量phi中。这是通过将纬度的角度值减去90度，然后乘以π/180来实现的。
+        3. 创建一个Three.js的Vector3对象，用于表示三维空间中的一个点。
+        4. 使用Three.js的Spherical类创建一个球坐标，该坐标使用给定的半径（radius）、纬度（phi）和经度（theta）。
+        5. 使用setFromSpherical()方法将球坐标转换为三维空间中的坐标，并将结果存储在Vector3对象中。
+        6. 返回计算得到的三维空间坐标。
+
+        因此，这个函数的作用是将地理坐标系中的经纬度转换为三维空间中的坐标，而半径则指定了球体的大小。 
+        
+        ***********************************************************************************/
+
+        function lglt2xyz(lng, lat, radius) {
+            const theta = (90 + lng) * (Math.PI / 180);
+            const phi = (90 - lat) * (Math.PI / 180);
+            return (new THREE.Vector3()).setFromSpherical(new THREE.Spherical(radius, phi, theta));
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            //rotationAngle += 0.0001;            
+            earthGroup.rotateY(rotationAngle);
+
+            // 如果开始并且启用了发光效果
+            if (hasGlow) {
+                // 渲染模糊效果
+                blurComposer.render()
+                //console.log("渲染模糊效果")
+                // 渲染场景
+                sceneComposer.render()
+                //console.log("渲染场景")
+            } else {
+                // 渲染场景，标记为已启动
+                renderer.render(scene, camera);
+            }
+        }
+
+        // 创建包含外部光晕效果的组
+        function createOuterGlow() {
+            let glowGroup = new THREE.Group()
+            glowGroup.add(createGlow()) // 添加光晕效果
+            glowGroup.add(createBlack()) // 添加黑色背景 
+            console.log("reateOuterGlow()", glowGroup)
+            return glowGroup
+        }
+
+        // 创建黑色背景
+        function createBlack() {
+            let sphere = new THREE.SphereGeometry(0.99, 32, 32)
+            let blackMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 })
+            let blackSphere = new THREE.Mesh(sphere, blackMaterial)
+            blackSphere.material.transparent = false
+            console.log("createBlack()", blackSphere)
+            return blackSphere
+        }
+
+        // 创建发光效果的球体
+        function createGlow() {
+            let sphere = new THREE.SphereGeometry(0.99, 32, 32)
+            let material = createFlowMaterial()
+            let glowSphere = new THREE.Mesh(sphere, material)
+            glowSphere.material.side = THREE.BackSide // 设置渲染面为背面
+            glowSphere.material.transparent = false // 不透明
+            glowSphere.scale.x = glowSphere.scale.y = glowSphere.scale.z = 1.3 // 缩放效果
+            console.log("createGlow()", glowSphere)
+            return glowSphere
+        }
+
+        // 创建用于流动效果的材质
+        function createFlowMaterial() {
+            let material = new THREE.ShaderMaterial({
+                uniforms: {
+                    'c': { type: 'f', value: 0.34 },
+                    'p': { type: 'f', value: 9.17 }
+                },
+                vertexShader: vertexShader, // 使用上方定义的顶点着色器
+                fragmentShader: fragmentShader // 使用上方定义的片元着色器
+            })
+            console.log("createFlowMaterial() ", material)
+            return material
+        }
+
+        function createOutGlow() {
+
+            // 创建用于模糊处理的场景对象
+            blurScene = new THREE.Scene()
+
+            // 创建外部光晕效果的组，并使用 Glow.createOuterGlow 函数获取
+            let glowGroup = createOuterGlow()
+
+            // 将外部光晕效果的组添加到 blurScene 场景中
+            blurScene.add(glowGroup)
+
+            // 创建渲染目标，用于渲染到纹理
+            let blurRenderTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+                // 设置纹理的最小过滤器为线性过滤器
+                minFilter: THREE.LinearFilter,
+
+                // 设置纹理的最大过滤器为线性过滤器
+                magFilter: THREE.LinearFilter,
+
+                // 设置渲染目标的颜色格式为 RGBA 格式，包括红、绿、蓝和透明度通道
+                format: THREE.RGBAFormat,
+
+                // 启用模板缓冲区，用于处理模板测试和遮罩
+                stencilBuffer: true
+            })
+
+            // 创建模糊处理的渲染通道
+            let blurRenderPass = new THREE.RenderPass(blurScene, camera)
+
+            // 创建场景的渲染通道
+            let sceneRenderPass = new THREE.RenderPass(scene, camera)
+
+            // 创建效果合成器并添加模糊渲染通道
+            blurComposer = new THREE.EffectComposer(renderer, blurRenderTarget)
+            blurComposer.addPass(blurRenderPass)
+
+            // 创建效果合成器并添加场景渲染通道
+            sceneComposer = new THREE.EffectComposer(renderer, blurRenderTarget)
+            sceneComposer.addPass(sceneRenderPass)
+
+            // 创建使用发光混合着色器的效果通道
+            let effectBlend = new THREE.ShaderPass(AdditiveBlendShader, 'tSampler1')
+
+            // 将 effectBlend 的 uniforms 属性中的 tSampler2 设置为 blurComposer 的渲染目标的纹理
+            effectBlend.uniforms['tSampler2'].value = blurComposer.renderTarget2.texture
+            effectBlend.renderToScreen = true
+
+            // 将 effectBlend 通道添加到 sceneComposer 中
+
+            sceneComposer.addPass(effectBlend)
+            console.log("blurScene", blurScene)
+            console.log("blurRenderTarget", blurRenderTarget)
+            console.log("blurRenderTarget2", blurComposer.renderTarget2)
+            console.log("blurRenderPass", blurRenderPass)
+            console.log("sceneRenderPass", sceneRenderPass)
+            console.log("blurComposer", blurComposer)
+            console.log("sceneComposer", sceneComposer)
+            console.log("effectBlend", effectBlend)
+        }
+    </script>
+</body>
+
+</html>
